@@ -39,14 +39,24 @@ SDKs are content-addressed and immutable. A new upstream commit, hook/API surfac
 
 ## Verified upstream producer boundary
 
-The upstream SDK publishing workflow has been inspected, not assumed:
+The earlier assumption that this pinned upstream already publishes a native-mod SDK was incorrect and has been removed. I re-queried the actual repository at the exact pinned commit `d1b6cd286ea4ebafd4e454829e199a867937b77a`, in both `horizon-rust/horizon` and the `arismoko/horizon` release repository:
 
-- `prebuilt-game-build.yml` creates the SDK slices in separate target-specific build legs, then uploads them as `sdk-leg-*` artifacts.
-- Its current target matrix contains Linux x86-64, Linux server x86-64, Windows GNU x86-64 and macOS ARM64. It does **not** contain `aarch64-linux-android`.
-- `sdk-publish.yml` gathers those already-built artifacts, creates the API-source archive and index, signs the checksum manifest, then publishes `sdk-<commit>`. It is a pack/sign/publish stage, not an Android cross-compilation implementation.
-- This repository's installer requires `runtime`, `api` and `engine` archives for `aarch64-linux-android`. With the upstream matrix as inspected, a normal published SDK cannot satisfy that requirement; the installer must refuse it.
+- The pinned `.github/workflows` contains `game-build.yml`, not `prebuilt-game-build.yml` or `sdk-publish.yml`.
+- The pinned `game-build.yml` builds desktop executables for Linux x86-64, Windows x64/ARM64 and macOS ARM64/x64. It does not build `aarch64-linux-android` or publish Android SDK slices.
+- The release API has no `sdk-d1b6cd286ea4ebafd4e454829e199a867937b77a` release tag.
+- The upstream build is a desktop executable/package pipeline. It does not define the Android NativeActivity `cdylib` runtime, SDK slice layout or an Android incremental link contract.
 
-Therefore, adding an Android target name to the installer or publishing desktop slices under an Android filename would be incorrect. The producer itself also assumes a desktop executable model: `tools/prebuilt_game.py` chooses the Rust host triple (`rustc -vV`), derives linker/library naming from the runner's `sys.platform`, and smoke-tests a standalone `horizon-client` executable. Our Android integration instead launches `libhorizon_android_game.so` through Android's native activity/host path. An Android leg therefore needs an Android-specific build/pack/smoke adapter and an explicit mod-link contract; merely adding `aarch64-linux-android` to the matrix would still produce the wrong runtime artifact. The next engineering gate is a real Android ARM64 producer leg that builds and smoke-tests the exact Android runtime/link artifacts using a pinned NDK, Rust toolchain and Android API floor. It must produce all three slices in the layout expected by the installer and prove that the final Android game library links against them. Only then should the SDK be published and consumed by the phone.
+Consequently, the current `android/termux/install-native-sdk.py` is only a consumer for a release format that is not currently produced for this pinned source. It cannot install an SDK for this commit today. The Ed25519 verification logic can still be useful as a format/security design, but the upstream public key and expected release tag must not be treated as proof that an Android SDK exists.
+
+**Correct implementation direction:** rustMC must own an Android-specific SDK format and producer, rather than pretending the upstream desktop release already supplies one. Before creating a publisher, we must define the exact contents of each slice from real Android build outputs and prove how they are consumed by a mod-only build. In particular:
+
+1. Build the patched Android workspace for `aarch64-linux-android` with a pinned NDK, Rust toolchain and API floor.
+2. Identify reusable compiler inputs and engine artifacts from the actual Cargo build graph. Do not assume desktop `runtime/api/engine` archives map directly to Android.
+3. Demonstrate that a source-mixin mod can be applied and compiled against those artifacts without recompiling unchanged engine crates. If Cargo must relink the final `libhorizon_android_game.so`, that is acceptable; a full engine rebuild is not.
+4. Define an index with source tree, patch/overlay, mixins, hooks/API, NDK, Rust, target, ABI, linker, and artifact hashes. Sign it with a rustMC-controlled release key, not an unavailable upstream private key.
+5. Test installation, tamper rejection, rollback and a real Android ELF link before enabling publication.
+
+Until those gates pass, the current full-game `build-with-mods.sh` remains the working fallback and the SDK workflow must not publish anything. Do not fabricate `runtime`, `api` or `engine` slices from the APK's final shared library: that would not create a reusable mod compiler SDK.
 
 The pinned upstream has two related but distinct native extension mechanisms. They must not be conflated:
 
