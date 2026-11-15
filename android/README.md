@@ -21,3 +21,7 @@ check whether a helper in `game/android.rs` can do it instead.
 
 `.github/workflows/upstream-compatible.yml` builds the newest upstream Nightlies every 6 hours and moves the
 pin to the first one that builds. How the app follows them: see `UPDATES.md`.
+
+## Native Android HMOD work
+
+The long-term SDK/build/runtime contract is documented in [NATIVE_HMOD_ANDROID_ARCHITECTURE.md](NATIVE_HMOD_ANDROID_ARCHITECTURE.md). The current `build-with-mods.sh` remains the legacy full-game rebuild route; do not describe it as SDK-based or claim that mod-only builds avoid rebuilding the game until the acceptance tests in that document pass. The legacy `.hnmod` route must remain available as a fallback during the migration.
