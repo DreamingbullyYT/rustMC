@@ -92,7 +92,7 @@ val rustBuildTasks = rustAndroidTargets.map { (abi, target, compilerPrefix) ->
         environment("CC_${target}", ndkBin.resolve("${compilerPrefix}26-clang").absolutePath)
         environment("AR_${target}", ndkBin.resolve("llvm-ar").absolutePath)
         System.getenv("HORIZON_MSA_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { environment("HORIZON_MSA_CLIENT_ID", it) }
-        commandLine("cargo", "build", "--manifest-path", "core/Cargo.toml", "--target", target, "--release", "--features", "audio")
+        commandLine("cargo", "build", "--manifest-path", "core/Cargo.toml", "--target", target, "--release", "--features", "audio", "--timings")
         doLast {
             copy { from(rustTargetDir.get().file("$target/release/libhorizon_core.so")); into(rustJniLibs.get().dir(abi)) }
         }
@@ -113,7 +113,7 @@ val rustAuthBuildTasks = rustAndroidTargets.map { (abi, target, compilerPrefix) 
         environment("CC_${target}", ndkBin.resolve("${compilerPrefix}26-clang").absolutePath)
         environment("AR_${target}", ndkBin.resolve("llvm-ar").absolutePath)
         System.getenv("HORIZON_MSA_CLIENT_ID")?.takeIf { it.isNotBlank() }?.let { environment("HORIZON_MSA_CLIENT_ID", it) }
-        commandLine("cargo", "build", "--manifest-path", "android-auth/Cargo.toml", "--target", target, "--release")
+        commandLine("cargo", "build", "--manifest-path", "android-auth/Cargo.toml", "--target", target, "--release", "--timings")
         doLast {
             copy { from(rustTargetDir.get().file("$target/release/libhorizon_msa.so")); into(rustJniLibs.get().dir(abi)) }
         }
@@ -135,7 +135,7 @@ val androidGameBuildTasks = rustAndroidTargets.map { (abi, target, compilerPrefi
         environment("CARGO_TARGET_${targetEnv}_LINKER", ndkBin.resolve("${compilerPrefix}26-clang").absolutePath)
         environment("CC_${target}", ndkBin.resolve("${compilerPrefix}26-clang").absolutePath)
         environment("AR_${target}", ndkBin.resolve("llvm-ar").absolutePath)
-        commandLine("cargo", "build", "--manifest-path", "horizon/Cargo.toml", "--package", "horizon-android-game", "--target", target, "--profile", "fast")
+        commandLine("cargo", "build", "--manifest-path", "horizon/Cargo.toml", "--package", "horizon-android-game", "--target", target, "--profile", "fast", "--timings")
         doLast {
             copy { from(rustTargetDir.get().file("$target/fast/libhorizon_android_game.so")); into(rustJniLibs.get().dir(abi)) }
         }
