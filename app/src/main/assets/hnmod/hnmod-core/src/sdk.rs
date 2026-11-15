@@ -216,6 +216,109 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
     Ok(entries)
 }
 
+/// Re-extract the signed archives and compare their contents with the installed slice tree.
+/// The local install receipt is not trusted as an integrity source: it is only an expected
+/// inventory to compare against a fresh extraction of the cryptographically verified archives.
+fn verify_extracted_tree(directory: &Path, expected: &BTreeMap<String, String>) -> Result<(), String> {
+    use std::process::Command;
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = std::env::temp_dir().join(format!(
+        "horizon-sdk-tree-verify-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&temp)
+        .map_err(|e| format!("cannot create SDK tree verification directory: {e}"))?;
+
+    // Python's standard-library tarfile reader handles xz without adding a native Rust
+    // compression dependency. Extraction is deliberately implemented here rather than
+    // using tar.extractall(): only regular files/directories and confined relative paths
+    // are accepted. All archives have already passed the signed SHA-256 inventory check.
+    const EXTRACT: &str = r#"
+import pathlib, sys, tarfile
+root = pathlib.Path(sys.argv[1]).resolve() / "slices"
+root.mkdir(parents=True, exist_ok=True)
+archives = [pathlib.Path(p) for p in sys.argv[2:]]
+for archive in archives:
+    name = archive.name[:-len(".tar.xz")]
+    destination = root / name
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r:xz") as tar:
+        members = tar.getmembers()
+        if len(members) > 100000:
+            raise SystemExit("archive contains too many entries: " + archive.name)
+        total = 0
+        seen = set()
+        for member in members:
+            if member.isdir() and member.name in (".", "./"):
+                continue
+            rel = pathlib.PurePosixPath(member.name)
+            if rel.is_absolute() or not rel.parts or any(p in ("", ".", "..") for p in rel.parts):
+                raise SystemExit("unsafe archive path: " + repr(member.name))
+            if not (member.isfile() or member.isdir()):
+                raise SystemExit("link or special archive member: " + repr(member.name))
+            key = rel.as_posix()
+            if key in seen:
+                raise SystemExit("duplicate archive path: " + key)
+            seen.add(key)
+            total += max(member.size, 0)
+            if total > 8 * 1024 * 1024 * 1024:
+                raise SystemExit("archive expands beyond 8 GiB")
+            target = (destination / pathlib.Path(*rel.parts)).resolve()
+            if target != destination and destination not in target.parents:
+                raise SystemExit("archive path escapes destination: " + repr(member.name))
+        for member in members:
+            if member.isdir() and member.name in (".", "./"):
+                continue
+            target = destination.joinpath(*pathlib.PurePosixPath(member.name).parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = tar.extractfile(member)
+            if source is None:
+                raise SystemExit("cannot read archive member: " + member.name)
+            with source, target.open("xb") as output:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    output.write(block)
+            target.chmod(0o755 if member.mode & 0o111 else 0o644)
+"#;
+    let archives = [
+        "build-data.tar.xz",
+        "api-source.tar.xz",
+        "runtime-aarch64-linux-android.tar.xz",
+        "api-aarch64-linux-android.tar.xz",
+        "engine-aarch64-linux-android.tar.xz",
+    ];
+    let mut command = Command::new("python3");
+    command.arg("-c").arg(EXTRACT).arg(&temp);
+    for name in archives {
+        command.arg(directory.join(name));
+    }
+    let result = (|| {
+        let output = command.output()
+            .map_err(|e| format!("cannot start SDK archive verifier (python3): {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "cannot safely re-extract signed SDK archives: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let extracted = temp.join("slices");
+        let mut actual = BTreeMap::new();
+        hash_tree(&extracted, &extracted, &mut actual)?;
+        if &actual != expected {
+            return Err("SDK extracted files differ from a fresh extraction of the signed archives".into());
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&temp);
+    result
+}
+
 impl VerifiedIdentity {
     /// Read an SDK only after independently verifying its signed release inventory and assets.
     /// The install receipt is an additional consistency check, never the source of trust.
@@ -291,11 +394,15 @@ impl VerifiedIdentity {
                 return Err(format!("installed SDK asset {name} does not match sdk.json"));
             }
         }
+        // The receipt is mutable app-private data, so it cannot authenticate the extracted
+        // tree. Rebuild the tree from the signed archives and compare both the receipt and
+        // the on-disk slices against that independently derived inventory.
+        verify_extracted_tree(directory, &receipt.files)?;
         let slices = directory.join("slices");
-        let mut files = BTreeMap::new();
-        hash_tree(&slices, &slices, &mut files)?;
-        if files != receipt.files {
-            return Err("SDK extracted files do not match the signed installation receipt".into());
+        let mut installed_files = BTreeMap::new();
+        hash_tree(&slices, &slices, &mut installed_files)?;
+        if installed_files != receipt.files {
+            return Err("installed SDK slices differ from the signed archive contents".into());
         }
         Ok(identity)
     }
@@ -407,6 +514,37 @@ mod tests {
         const SIGNATURE: &str = "kqAJqfDUyrhyDoILX2QlQKKye1QWUD+Ps3YiI+vbadoIWsHkPhWZbkWPNhPQ8R2MOHsurrQwKu6wDSkWErsMAA==";
         assert!(verify_ed25519_payload(b"r", SIGNATURE, TEST_KEY).unwrap());
         assert!(!verify_ed25519_payload(b"tampered", SIGNATURE, TEST_KEY).unwrap());
+    }
+
+    #[test]
+    fn rederives_extracted_sdk_tree_from_signed_archives() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let temp = std::env::temp_dir().join(format!("hnmod-sdk-archives-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let names = [
+            "build-data.tar.xz",
+            "api-source.tar.xz",
+            "runtime-aarch64-linux-android.tar.xz",
+            "api-aarch64-linux-android.tar.xz",
+            "engine-aarch64-linux-android.tar.xz",
+        ];
+        let mut command = std::process::Command::new("python3");
+        command.arg("-c").arg(
+            "import io,sys,tarfile\nfor p in sys.argv[1:]:\\n t=tarfile.open(p,'w:xz')\\n d=b'authenticated fixture'\\n i=tarfile.TarInfo('payload.txt'); i.size=len(d)\\n t.addfile(i,io.BytesIO(d)); t.close()"
+        );
+        for name in names {
+            command.arg(temp.join(name));
+        }
+        let output = command.output().expect("python3 is required for SDK archive verification tests");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        let digest = format!("{:x}", Sha256::digest(b"authenticated fixture"));
+        let expected: BTreeMap<String, String> = names.iter().map(|name| {
+            (format!("{}/payload.txt", &name[..name.len() - ".tar.xz".len()]), digest.clone())
+        }).collect();
+        verify_extracted_tree(&temp, &expected).unwrap();
+        assert!(verify_extracted_tree(&temp, &BTreeMap::new()).is_err());
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
