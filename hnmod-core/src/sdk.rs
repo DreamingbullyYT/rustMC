@@ -236,7 +236,8 @@ fn verify_extracted_tree(directory: &Path, expected: &BTreeMap<String, String>) 
     // are accepted. All archives have already passed the signed SHA-256 inventory check.
     const EXTRACT: &str = r#"
 import pathlib, sys, tarfile
-root = pathlib.Path(sys.argv[1]).resolve()
+root = pathlib.Path(sys.argv[1]).resolve() / "slices"
+root.mkdir(parents=True, exist_ok=True)
 archives = [pathlib.Path(p) for p in sys.argv[2:]]
 for archive in archives:
     name = archive.name[:-len(".tar.xz")]
