@@ -37,6 +37,19 @@ The index must include the target triple, ABI, Android API level, NDK and Rust v
 
 SDKs are content-addressed and immutable. A new upstream commit, hook/API surface, compiler, NDK, linker, target or package schema produces a new SDK identity; it must never overwrite an older SDK in place. Keep the last known-good SDK available for rollback. Do not fetch or build SDKs for unsupported targets.
 
+## Verified upstream producer boundary
+
+The upstream SDK publishing workflow has been inspected, not assumed:
+
+- `prebuilt-game-build.yml` creates the SDK slices in separate target-specific build legs, then uploads them as `sdk-leg-*` artifacts.
+- Its current target matrix contains Linux x86-64, Linux server x86-64, Windows GNU x86-64 and macOS ARM64. It does **not** contain `aarch64-linux-android`.
+- `sdk-publish.yml` gathers those already-built artifacts, creates the API-source archive and index, signs the checksum manifest, then publishes `sdk-<commit>`. It is a pack/sign/publish stage, not an Android cross-compilation implementation.
+- This repository's installer requires `runtime`, `api` and `engine` archives for `aarch64-linux-android`. With the upstream matrix as inspected, a normal published SDK cannot satisfy that requirement; the installer must refuse it.
+
+Therefore, adding an Android target name to the installer or publishing desktop slices under an Android filename would be incorrect. The next engineering gate is a real Android ARM64 producer leg that builds and smoke-tests the exact runtime/link artifacts using a pinned NDK, Rust toolchain and Android API floor. It must produce all three slices in the layout expected by the installer and prove that the final Android game library links against them. Only then should the SDK be published and consumed by the phone.
+
+There is also a repository-identity boundary to verify before enabling downloads: the Android game build currently fetches `horizon-rust/horizon`, while the SDK installer fetches releases from `arismoko/horizon`. A commit string match alone is insufficient. The producer must attest to the source tree identity and all Android overlay/patch inputs used by the game build; otherwise the SDK and installed game could describe different source trees.
+
 ## On-device build pipeline
 
 1. Import into an immutable staging directory; reject path traversal, duplicate IDs, oversized archives and malformed manifests.
