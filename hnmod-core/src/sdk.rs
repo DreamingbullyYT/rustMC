@@ -190,8 +190,8 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
 }
 
 impl VerifiedIdentity {
-    /// Read an SDK directory only after the Android installer has verified its signed release.
-    /// The receipt is written after Ed25519 verification and all asset checks pass.
+    /// Read an SDK only after independently verifying its signed release inventory and assets.
+    /// The install receipt is an additional consistency check, never the source of trust.
     pub fn read(directory: &Path) -> Result<Self, String> {
         if !directory.is_dir() {
             return Err(format!("{} is not an installed SDK directory", directory.display()));
