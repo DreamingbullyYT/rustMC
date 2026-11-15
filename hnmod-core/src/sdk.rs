@@ -517,6 +517,37 @@ mod tests {
     }
 
     #[test]
+    fn rederives_extracted_sdk_tree_from_signed_archives() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let temp = std::env::temp_dir().join(format!("hnmod-sdk-archives-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let names = [
+            "build-data.tar.xz",
+            "api-source.tar.xz",
+            "runtime-aarch64-linux-android.tar.xz",
+            "api-aarch64-linux-android.tar.xz",
+            "engine-aarch64-linux-android.tar.xz",
+        ];
+        let mut command = std::process::Command::new("python3");
+        command.arg("-c").arg(
+            "import io,sys,tarfile\\nfor p in sys.argv[1:]:\\n t=tarfile.open(p,'w:xz')\\n d=b'authenticated fixture'\\n i=tarfile.TarInfo('payload.txt'); i.size=len(d)\\n t.addfile(i,io.BytesIO(d)); t.close()"
+        );
+        for name in names {
+            command.arg(temp.join(name));
+        }
+        let output = command.output().expect("python3 is required for SDK archive verification tests");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        let digest = format!("{:x}", Sha256::digest(b"authenticated fixture"));
+        let expected: BTreeMap<String, String> = names.iter().map(|name| {
+            (format!("{}/payload.txt", &name[..name.len() - ".tar.xz".len()]), digest.clone())
+        }).collect();
+        verify_extracted_tree(&temp, &expected).unwrap();
+        assert!(verify_extracted_tree(&temp, &BTreeMap::new()).is_err());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn refuses_a_forged_install_receipt_without_a_signed_inventory() {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let temp = std::env::temp_dir().join(format!("hnmod-sdk-test-{}-{nonce}", std::process::id()));
