@@ -50,6 +50,18 @@ Therefore, adding an Android target name to the installer or publishing desktop 
 
 There is also a repository-identity boundary to verify before enabling downloads: the Android game build currently fetches `horizon-rust/horizon`, while the SDK installer fetches releases from `arismoko/horizon`. A commit string match alone is insufficient. The producer must attest to the source tree identity and all Android overlay/patch inputs used by the game build; otherwise the SDK and installed game could describe different source trees.
 
+## Repository automation
+
+`.github/workflows/android-native-sdk.yml` is the automation entry point:
+
+- It listens for a completed `Android build` workflow so it can follow the repository's rolling Nightly release, which is created by the APK workflow with the repository token.
+- It also listens for published version-tag APK builds through the same workflow completion path and supports a manual dispatch for a selected rustMC commit.
+- Before any build, it resolves both the exact rustMC commit and the full upstream Horizon commit in `android/UPSTREAM_PIN`.
+- It is fail-closed. Until the executable `android/ci/build-native-sdk.sh` producer exists, the run reports that no SDK was published and skips publication. It never relabels desktop SDK files as Android.
+- Once implemented, that producer must own the complete pinned NDK/Rust build, SDK slice packaging, reproducibility and Android ELF/link smoke tests, signature verification and immutable publication. A successful APK build alone is not evidence that the native SDK is valid.
+
+The workflow file can be reviewed on a feature branch, but GitHub only activates `workflow_run` triggers after the workflow definition is present on the repository's default branch. Do not merge this PR merely to test the workflow; use a manual run after the producer is complete and merge is explicitly approved.
+
 ## On-device build pipeline
 
 1. Import into an immutable staging directory; reject path traversal, duplicate IDs, oversized archives and malformed manifests.
