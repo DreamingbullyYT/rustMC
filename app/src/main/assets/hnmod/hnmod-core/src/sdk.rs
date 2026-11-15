@@ -123,9 +123,76 @@ fn hash_tree(root: &Path, current: &Path, output: &mut BTreeMap<String, String>)
     Ok(())
 }
 
+const RELEASE_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAIql+MN7pjxis0Xm+fRhjoW0aIwO1tV/gQLonX1tK35o=\n-----END PUBLIC KEY-----\n";
+
+/// Re-check the upstream Ed25519 signature at use time. The install receipt is writable
+/// app data and is not, by itself, cryptographic proof of a trusted SDK.
+fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>, String> {
+    use std::{io::Write, process::Command};
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sums = std::fs::read(directory.join("SHA256SUMS"))
+        .map_err(|e| format!("SDK signed checksum inventory is missing: {e}"))?;
+    let signatures = std::fs::read_to_string(directory.join("SHA256SUMS.sig"))
+        .map_err(|e| format!("SDK signature list is missing: {e}"))?;
+    let mut entries = BTreeMap::new();
+    for line in std::str::from_utf8(&sums).map_err(|_| "SDK checksum inventory is not ASCII")?.lines() {
+        let (hash, name) = line.split_once("  ").ok_or("invalid SDK checksum row")?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            || name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            || entries.insert(name.to_owned(), hash.to_owned()).is_some() {
+            return Err(format!("invalid or duplicate SDK checksum row: {line:?}"));
+        }
+    }
+    if !entries.contains_key("sdk.json") {
+        return Err("signed SDK checksum inventory does not include sdk.json".into());
+    }
+    let temp = std::env::temp_dir().join(format!(
+        "horizon-sdk-verify-{}-{}", std::process::id(),
+        NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&temp).map_err(|e| format!("cannot create SDK verification directory: {e}"))?;
+    let result = (|| {
+        let key = temp.join("release-key.pem");
+        let message = temp.join("signed-message");
+        std::fs::write(&key, RELEASE_PUBLIC_KEY_PEM).map_err(|e| e.to_string())?;
+        // The signed payload is the literal release tag followed by the complete SHA256SUMS file.
+        let mut signed = Vec::new();
+        let index: SdkIndex = serde_json::from_slice(&std::fs::read(directory.join("sdk.json")).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("invalid sdk.json: {e}"))?;
+        signed.clear();
+        signed.extend_from_slice(format!("horizon release sdk-{}\n", index.build.commit).as_bytes());
+        signed.extend_from_slice(&sums);
+        std::fs::write(&message, signed).map_err(|e| e.to_string())?;
+        let sig_path = temp.join("signature");
+        let mut verified = false;
+        for encoded in signatures.lines().filter(|line| !line.trim().is_empty()) {
+            // Decode through stdin so signature records are not interpolated into a shell command.
+            use std::process::Stdio;
+            let mut child = Command::new("base64").arg("-d").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
+                .map_err(|e| format!("cannot start base64 verifier: {e}"))?;
+            child.stdin.take().ok_or("base64 stdin unavailable")?.write_all(encoded.as_bytes())
+                .map_err(|e| e.to_string())?;
+            let decoded = child.wait_with_output().map_err(|e| e.to_string())?;
+            if !decoded.status.success() { continue; }
+            std::fs::write(&sig_path, decoded.stdout).map_err(|e| e.to_string())?;
+            let check = Command::new("openssl").args([
+                "pkeyutl", "-verify", "-pubin", "-inkey", key.to_str().ok_or("temporary key path is not UTF-8")?,
+                "-rawin", "-in", message.to_str().ok_or("temporary message path is not UTF-8")?,
+                "-sigfile", sig_path.to_str().ok_or("temporary signature path is not UTF-8")?,
+            ]).output().map_err(|e| format!("OpenSSL SDK signature verifier unavailable: {e}"))?;
+            if check.status.success() { verified = true; break; }
+        }
+        if !verified { return Err("SDK Ed25519 release signature is invalid".into()); }
+        Ok(entries)
+    })();
+    let _ = std::fs::remove_dir_all(&temp);
+    result
+}
+
+
 impl VerifiedIdentity {
-    /// Read an SDK directory only after the Android installer has verified its signed release.
-    /// The receipt is written after Ed25519 verification and all asset checks pass.
+    /// Read an SDK only after independently verifying its signed release inventory and assets.
+    /// The install receipt is an additional consistency check, never the source of trust.
     pub fn read(directory: &Path) -> Result<Self, String> {
         if !directory.is_dir() {
             return Err(format!("{} is not an installed SDK directory", directory.display()));
@@ -135,6 +202,24 @@ impl VerifiedIdentity {
         let index: SdkIndex = serde_json::from_slice(&bytes)
             .map_err(|e| format!("{}: invalid sdk.json: {e}", index_path.display()))?;
         let index_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        // Re-verify the release signature here; never trust the mutable install receipt's
+        // signature_verified boolean as proof that this SDK is still authentic.
+        let signed_assets = verify_signed_inventory(directory)?;
+
+        // The release signer covers every indexed SDK asset, not only the Android subset
+        // copied into this installation. Enforce the complete inventory shape so an index
+        // cannot silently omit or add release assets while retaining a valid signature.
+        let mut expected_inventory = std::collections::BTreeSet::new();
+        expected_inventory.insert("sdk.json".to_owned());
+        expected_inventory.extend(index.assets.keys().cloned());
+        let actual_inventory: std::collections::BTreeSet<_> = signed_assets.keys().cloned().collect();
+        if actual_inventory != expected_inventory {
+            return Err("signed SDK checksum inventory does not exactly match sdk.json assets".into());
+        }
+        if signed_assets.get("sdk.json") != Some(&index_sha256) {
+            return Err("sdk.json does not match its signed checksum inventory entry".into());
+        }
+
         let receipt_path = directory.join(".install-manifest.json");
         let receipt: InstallReceipt = serde_json::from_slice(
             &std::fs::read(&receipt_path).map_err(|e| format!("{}: {e}", receipt_path.display()))?
@@ -150,6 +235,22 @@ impl VerifiedIdentity {
         }
         let identity = Self { index, index_sha256 };
         identity.validate()?;
+        for name in [
+            "sdk.json", "SHA256SUMS", "SHA256SUMS.sig",
+            "surface.json", "build-data.tar.xz", "api-source.tar.xz",
+            "runtime-aarch64-linux-android.tar.xz",
+            "api-aarch64-linux-android.tar.xz",
+            "engine-aarch64-linux-android.tar.xz",
+        ] {
+            if name != "SHA256SUMS" && name != "SHA256SUMS.sig" {
+                let expected = signed_assets.get(name)
+                    .ok_or_else(|| format!("signed SDK inventory omits {name}"))?;
+                let (_, actual) = hash_file(&directory.join(name))?;
+                if &actual != expected {
+                    return Err(format!("SDK asset {name} does not match the signed checksum inventory"));
+                }
+            }
+        }
         for name in [
             "surface.json", "build-data.tar.xz", "api-source.tar.xz",
             "runtime-aarch64-linux-android.tar.xz",
@@ -274,45 +375,27 @@ mod tests {
     }
 
     #[test]
-    fn reads_only_an_installed_sdk_with_a_matching_signature_receipt() {
+    fn refuses_a_forged_install_receipt_without_a_signed_inventory() {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let temp = std::env::temp_dir().join(format!("hnmod-sdk-test-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
-        std::fs::create_dir_all(temp.join("slices")).unwrap();
-        let mut value = index("aarch64-linux-android");
-        let assets = value["assets"].as_object_mut().unwrap();
-        for (name, asset) in assets.iter_mut() {
-            let data = format!("asset:{name}").into_bytes();
-            std::fs::write(temp.join(name), &data).unwrap();
-            asset["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&data)));
-            asset["size"] = serde_json::json!(data.len());
-        }
+        std::fs::create_dir_all(&temp).unwrap();
+        let value = index("aarch64-linux-android");
         let bytes = serde_json::to_vec(&value).unwrap();
         std::fs::write(temp.join("sdk.json"), &bytes).unwrap();
         let parsed: SdkIndex = serde_json::from_slice(&bytes).unwrap();
-        let digest = format!("{:x}", Sha256::digest(&bytes));
         let receipt = serde_json::json!({
             "files": {},
             "signature_verified": true,
             "tag": format!("sdk-{}", parsed.build.commit),
-            "index_sha256": digest,
+            "index_sha256": format!("{:x}", Sha256::digest(&bytes)),
             "target": "aarch64-linux-android",
             "game_commit": parsed.build.commit,
             "mixins_rev": parsed.mixins.rev
         });
         std::fs::write(temp.join(".install-manifest.json"), serde_json::to_vec(&receipt).unwrap()).unwrap();
-        assert!(VerifiedIdentity::read(&temp).is_ok());
-        std::fs::write(temp.join("runtime-aarch64-linux-android.tar.xz"), b"tampered").unwrap();
-        assert!(VerifiedIdentity::read(&temp).unwrap_err().contains("does not match sdk.json"));
-        std::fs::write(temp.join("runtime-aarch64-linux-android.tar.xz"), b"asset:runtime-aarch64-linux-android.tar.xz").unwrap();
-        std::fs::create_dir_all(temp.join("slices/runtime")).unwrap();
-        std::fs::write(temp.join("slices/runtime/marker"), b"tampered").unwrap();
-        assert!(VerifiedIdentity::read(&temp).unwrap_err().contains("extracted files"));
-        std::fs::remove_file(temp.join("slices/runtime/marker")).unwrap();
-        let mut bad = receipt;
-        bad["signature_verified"] = serde_json::Value::Bool(false);
-        std::fs::write(temp.join(".install-manifest.json"), serde_json::to_vec(&bad).unwrap()).unwrap();
-        assert!(VerifiedIdentity::read(&temp).unwrap_err().contains("unsigned"));
+        let error = VerifiedIdentity::read(&temp).unwrap_err();
+        assert!(error.contains("signed checksum inventory is missing"), "{error}");
         std::fs::remove_dir_all(temp).unwrap();
     }
 
