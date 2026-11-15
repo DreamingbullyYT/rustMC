@@ -48,6 +48,15 @@ The upstream SDK publishing workflow has been inspected, not assumed:
 
 Therefore, adding an Android target name to the installer or publishing desktop slices under an Android filename would be incorrect. The producer itself also assumes a desktop executable model: `tools/prebuilt_game.py` chooses the Rust host triple (`rustc -vV`), derives linker/library naming from the runner's `sys.platform`, and smoke-tests a standalone `horizon-client` executable. Our Android integration instead launches `libhorizon_android_game.so` through Android's native activity/host path. An Android leg therefore needs an Android-specific build/pack/smoke adapter and an explicit mod-link contract; merely adding `aarch64-linux-android` to the matrix would still produce the wrong runtime artifact. The next engineering gate is a real Android ARM64 producer leg that builds and smoke-tests the exact Android runtime/link artifacts using a pinned NDK, Rust toolchain and Android API floor. It must produce all three slices in the layout expected by the installer and prove that the final Android game library links against them. Only then should the SDK be published and consumed by the phone.
 
+The current Android entry point has one more runtime integration gap, confirmed by inspecting upstream `horizon-mod-host/src/native_libraries.rs` and this repository's `horizon-android-game/src/lib.rs`:
+
+- Upstream's native host loads each compiled mod `.so` with `libloading`, validates its build identity, then enters the game through `horizon_client::entry::prepare/main_with`. Its current discovery path is based on `std::env::current_exe()` and files beside that executable.
+- This Android port starts through Winit's `android_main(AndroidApp)` inside `libhorizon_android_game.so` and currently enters the game through its Android-specific game loop. It is not the upstream standalone `horizon-client` executable.
+- Therefore the Android producer must not only cross-compile SDK crates. The Android runtime must also bridge the upstream native-mod registration/startup path to the existing NativeActivity lifecycle and a private app-owned mod directory. We must preserve the existing Android input/surface/audio path and ensure mod registration happens before engine startup/sealing.
+- The integration must reuse upstream's native-mod identity and registration semantics. It must not invent a Rust ABI between separately compiled libraries or call mod hooks after the engine seal.
+
+This runtime bridge is a required acceptance gate, not something an SDK packaging workflow can solve by itself.
+
 There is also a repository-identity boundary to verify before enabling downloads: the Android game build currently fetches `horizon-rust/horizon`, while the SDK installer fetches releases from `arismoko/horizon`. A commit string match alone is insufficient. The producer must attest to the source tree identity and all Android overlay/patch inputs used by the game build; otherwise the SDK and installed game could describe different source trees.
 
 ## Repository automation
