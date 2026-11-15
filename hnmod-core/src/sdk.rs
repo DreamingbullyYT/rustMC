@@ -128,7 +128,7 @@ const RELEASE_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAy
 /// Re-check the upstream Ed25519 signature at use time. The install receipt is writable
 /// app data and is not, by itself, cryptographic proof of a trusted SDK.
 fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>, String> {
-    use std::process::Command;
+    use std::{io::Write, process::Command};
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sums = std::fs::read(directory.join("SHA256SUMS"))
         .map_err(|e| format!("SDK signed checksum inventory is missing: {e}"))?;
@@ -155,12 +155,8 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
         let key = temp.join("release-key.pem");
         let message = temp.join("signed-message");
         std::fs::write(&key, RELEASE_PUBLIC_KEY_PEM).map_err(|e| e.to_string())?;
-        let mut signed = b"horizon release sdk-".to_vec();
-        signed.extend_from_slice(
-            std::str::from_utf8(&std::fs::read(directory.join("sdk.json")).map_err(|e| e.to_string())?)
-                .map_err(|_| "sdk.json is not UTF-8")?.as_bytes()
-        );
         // The signed payload is the literal release tag followed by the complete SHA256SUMS file.
+        let mut signed = Vec::new();
         let index: SdkIndex = serde_json::from_slice(&std::fs::read(directory.join("sdk.json")).map_err(|e| e.to_string())?)
             .map_err(|e| format!("invalid sdk.json: {e}"))?;
         signed.clear();
@@ -170,11 +166,6 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
         let sig_path = temp.join("signature");
         let mut verified = false;
         for encoded in signatures.lines().filter(|line| !line.trim().is_empty()) {
-            let output = Command::new("base64").args(["-d"]).output();
-            let mut decoder = output.map_err(|e| format!("base64 verifier unavailable: {e}"))?;
-            if !decoder.status.success() {
-                return Err("base64 verifier could not start".into());
-            }
             // Decode through stdin so signature records are not interpolated into a shell command.
             use std::process::Stdio;
             let mut child = Command::new("base64").arg("-d").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
