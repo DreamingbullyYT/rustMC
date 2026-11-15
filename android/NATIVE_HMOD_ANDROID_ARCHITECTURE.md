@@ -58,7 +58,7 @@ The pinned upstream has two related but distinct native extension mechanisms. Th
 
 The required Android acceptance gate is therefore a real, reproducible `horizon-mixins plan/apply` stage against the exact pinned source, followed by a successful Android-target compile/link of the resulting workspace while preserving the NativeActivity entry point. The current legacy `build-with-mods.sh` does apply mixins, stages optional trait-API crates and then rebuilds `horizon-android-game`; that proves only the full-game rebuild path, not the SDK-driven incremental/mod-only pipeline.
 
-There is also a repository-identity boundary to verify before enabling downloads: the Android game build currently fetches `horizon-rust/horizon`, while the SDK installer fetches releases from `arismoko/horizon`. A commit string match alone is insufficient. The producer must attest to the source tree identity and all Android overlay/patch inputs used by the game build; otherwise the SDK and installed game could describe different source trees.
+There is also a repository-identity boundary: the Android game build fetches `horizon-rust/horizon`, while the SDK installer fetches releases from `arismoko/horizon`. For the current pin `d1b6cd286ea4ebafd4e454829e199a867937b77a`, both repositories resolve the commit to the same Git tree `038e808bead7c05f7038dcf5c216ee807036c1bd`; this confirms source-tree identity for this pin, not for future pins automatically. Every SDK producer run must repeat that tree-identity check and attest the Android overlay, patches, toolchain and build inputs as well. A commit string match alone is not sufficient.
 
 ## Repository automation
 
