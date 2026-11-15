@@ -49,12 +49,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source_commit="${GITHUB_SHA}"
+          source_commit="$(git rev-parse HEAD)"
           if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Expected a full 40-character rustMC commit, got: $source_commit"
             exit 1
           fi
+          upstream_commit="$(tr -d '[:space:]' < android/UPSTREAM_PIN)"
+          if [[ ! "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::android/UPSTREAM_PIN is not a full upstream commit: $upstream_commit"
+            exit 1
+          fi
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "upstream_commit=$upstream_commit" >> "$GITHUB_OUTPUT"
           if [ -x android/ci/build-native-sdk.sh ]; then
             echo "producer_ready=true" >> "$GITHUB_OUTPUT"
           else
@@ -64,6 +70,7 @@ jobs:
             echo "## Android native HMOD SDK"
             echo
             echo "- rustMC source: `$source_commit`"
+            echo "- Horizon upstream pin: `$upstream_commit`"
             echo "- Android target: `aarch64-linux-android`"
             echo "- APK workflow: `${{ github.event.workflow_run.id || 'manual dispatch' }}`"
             echo
@@ -98,8 +105,9 @@ jobs:
       - name: Build and verify the Android SDK
         env:
           SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+          UPSTREAM_COMMIT: ${{ needs.preflight.outputs.upstream_commit }}
         run: |
           set -euo pipefail
           # The producer owns NDK/Rust pinning, slice layout, reproducibility checks,
           # ELF/link smoke tests and signing. It must publish only after all gates pass.
-          bash android/ci/build-native-sdk.sh "$SOURCE_COMMIT"
+          bash android/ci/build-native-sdk.sh "$SOURCE_COMMIT" "$UPSTREAM_COMMIT"
