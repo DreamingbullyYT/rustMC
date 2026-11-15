@@ -189,6 +189,14 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
     result
 }
 
+
+/// Return the complete set of asset names indexed by the already parsed sdk.json bytes.
+fn identity_asset_names(index_bytes: &[u8]) -> Result<Vec<String>, String> {
+    let index: SdkIndex = serde_json::from_slice(index_bytes)
+        .map_err(|e| format!("invalid sdk.json asset inventory: {e}"))?;
+    Ok(index.assets.into_keys().collect())
+}
+
 impl VerifiedIdentity {
     /// Read an SDK only after independently verifying its signed release inventory and assets.
     /// The install receipt is an additional consistency check, never the source of trust.
@@ -204,6 +212,21 @@ impl VerifiedIdentity {
         // Re-verify the release signature here; never trust the mutable install receipt's
         // signature_verified boolean as proof that this SDK is still authentic.
         let signed_assets = verify_signed_inventory(directory)?;
+
+        // The release signer covers every indexed SDK asset, not only the Android subset
+        // copied into this installation. Enforce the complete inventory shape so an index
+        // cannot silently omit or add release assets while retaining a valid signature.
+        let mut expected_inventory = std::collections::BTreeSet::new();
+        expected_inventory.insert("sdk.json".to_owned());
+        expected_inventory.extend(identity_asset_names(&bytes)?);
+        let actual_inventory: std::collections::BTreeSet<_> = signed_assets.keys().cloned().collect();
+        if actual_inventory != expected_inventory {
+            return Err("signed SDK checksum inventory does not exactly match sdk.json assets".into());
+        }
+        if signed_assets.get("sdk.json") != Some(&index_sha256) {
+            return Err("sdk.json does not match its signed checksum inventory entry".into());
+        }
+
         let receipt_path = directory.join(".install-manifest.json");
         let receipt: InstallReceipt = serde_json::from_slice(
             &std::fs::read(&receipt_path).map_err(|e| format!("{}: {e}", receipt_path.display()))?
