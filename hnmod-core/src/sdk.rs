@@ -529,9 +529,15 @@ mod tests {
             "engine-aarch64-linux-android.tar.xz",
         ];
         let mut command = std::process::Command::new("python3");
-        command.arg("-c").arg(
-            "import io,sys,tarfile\nfor p in sys.argv[1:]:\\n t=tarfile.open(p,'w:xz')\\n d=b'authenticated fixture'\\n i=tarfile.TarInfo('payload.txt'); i.size=len(d)\\n t.addfile(i,io.BytesIO(d)); t.close()"
-        );
+        command.arg("-c").arg(r#"import io,sys,tarfile
+for p in sys.argv[1:]:
+    t=tarfile.open(p, "w:xz")
+    d=b"authenticated fixture"
+    i=tarfile.TarInfo("payload.txt")
+    i.size=len(d)
+    t.addfile(i, io.BytesIO(d))
+    t.close()
+"#);
         for name in names {
             command.arg(temp.join(name));
         }
