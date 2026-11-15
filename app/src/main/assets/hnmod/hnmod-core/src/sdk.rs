@@ -208,7 +208,7 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
     let index: SdkIndex = serde_json::from_slice(
         &std::fs::read(directory.join("sdk.json")).map_err(|e| e.to_string())?
     ).map_err(|e| format!("invalid sdk.json: {e}"))?;
-    let mut signed = format!("horizon release sdk-{}\\n", index.build.commit).into_bytes();
+    let mut signed = format!("horizon release sdk-{}\n", index.build.commit).into_bytes();
     signed.extend_from_slice(&sums);
     if !verify_ed25519_payload(&signed, &signatures, RELEASE_PUBLIC_KEY_PEM)? {
         return Err("SDK Ed25519 release signature is invalid".into());
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn verifies_rfc8032_ed25519_signature_and_rejects_modified_payload() {
         // RFC 8032, test 1: Ed25519 signature of the empty message.
-        const TEST_KEY: &str = "-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\\n-----END PUBLIC KEY-----\\n";
+        const TEST_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n";
         const SIGNATURE: &str = "5VZDAMNgrHKQhuLMgG6CioSHfx645dl02HPgZSJJAVVfuIIVkKM7rMYeOXAc+bRr0lv18FlbviRlUUFDjnoQCw==";
         assert!(verify_ed25519_payload(b"", SIGNATURE, TEST_KEY).unwrap());
         assert!(!verify_ed25519_payload(b"tampered", SIGNATURE, TEST_KEY).unwrap());
