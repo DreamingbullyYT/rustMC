@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_commit: ${{ steps.identity.outputs.source_commit }}
+      upstream_commit: ${{ steps.identity.outputs.upstream_commit }}
       producer_ready: ${{ steps.identity.outputs.producer_ready }}
     steps:
       - name: Check out the exact source used by the APK build
