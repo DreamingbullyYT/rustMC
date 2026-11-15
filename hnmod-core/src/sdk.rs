@@ -530,7 +530,7 @@ mod tests {
         ];
         let mut command = std::process::Command::new("python3");
         command.arg("-c").arg(
-            "import io,sys,tarfile\\nfor p in sys.argv[1:]:\\n t=tarfile.open(p,'w:xz')\\n d=b'authenticated fixture'\\n i=tarfile.TarInfo('payload.txt'); i.size=len(d)\\n t.addfile(i,io.BytesIO(d)); t.close()"
+            "import io,sys,tarfile\nfor p in sys.argv[1:]:\\n t=tarfile.open(p,'w:xz')\\n d=b'authenticated fixture'\\n i=tarfile.TarInfo('payload.txt'); i.size=len(d)\\n t.addfile(i,io.BytesIO(d)); t.close()"
         );
         for name in names {
             command.arg(temp.join(name));
