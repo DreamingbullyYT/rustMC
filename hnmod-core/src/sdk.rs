@@ -125,11 +125,70 @@ fn hash_tree(root: &Path, current: &Path, output: &mut BTreeMap<String, String>)
 
 const RELEASE_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAIql+MN7pjxis0Xm+fRhjoW0aIwO1tV/gQLonX1tK35o=\n-----END PUBLIC KEY-----\n";
 
+/// Verify one or more base64 Ed25519 signatures with OpenSSL. The public key is PEM
+/// SubjectPublicKeyInfo; this helper is also exercised with the RFC 8032 test vector.
+fn verify_ed25519_payload(
+    message_bytes: &[u8],
+    signature_lines: &str,
+    public_key_pem: &str,
+) -> Result<bool, String> {
+    use std::{io::Write, process::{Command, Stdio}};
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = std::env::temp_dir().join(format!(
+        "horizon-sdk-verify-{}-{}",
+        std::process::id(),
+        NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&temp)
+        .map_err(|e| format!("cannot create SDK verification directory: {e}"))?;
+    let result = (|| {
+        let key = temp.join("release-key.pem");
+        let message = temp.join("signed-message");
+        let sig_path = temp.join("signature");
+        std::fs::write(&key, public_key_pem).map_err(|e| e.to_string())?;
+        std::fs::write(&message, message_bytes).map_err(|e| e.to_string())?;
+        let mut verified = false;
+        for encoded in signature_lines.lines().filter(|line| !line.trim().is_empty()) {
+            // Decode through stdin so signature records are never interpolated into a shell command.
+            let mut child = Command::new("base64")
+                .arg("-d")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("cannot start base64 verifier: {e}"))?;
+            child.stdin.take().ok_or("base64 stdin unavailable")?
+                .write_all(encoded.trim().as_bytes())
+                .map_err(|e| e.to_string())?;
+            let decoded = child.wait_with_output().map_err(|e| e.to_string())?;
+            if !decoded.status.success() {
+                continue;
+            }
+            std::fs::write(&sig_path, decoded.stdout).map_err(|e| e.to_string())?;
+            let check = Command::new("openssl")
+                .args([
+                    "pkeyutl", "-verify", "-pubin", "-inkey",
+                    key.to_str().ok_or("temporary key path is not UTF-8")?,
+                    "-rawin", "-in",
+                    message.to_str().ok_or("temporary message path is not UTF-8")?,
+                    "-sigfile",
+                    sig_path.to_str().ok_or("temporary signature path is not UTF-8")?,
+                ])
+                .output()
+                .map_err(|e| format!("OpenSSL SDK signature verifier unavailable: {e}"))?;
+            if check.status.success() {
+                verified = true;
+                break;
+            }
+        }
+        Ok(verified)
+    })();
+    let _ = std::fs::remove_dir_all(&temp);
+    result
+}
+
 /// Re-check the upstream Ed25519 signature at use time. The install receipt is writable
 /// app data and is not, by itself, cryptographic proof of a trusted SDK.
 fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>, String> {
-    use std::{io::Write, process::Command};
-    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sums = std::fs::read(directory.join("SHA256SUMS"))
         .map_err(|e| format!("SDK signed checksum inventory is missing: {e}"))?;
     let signatures = std::fs::read_to_string(directory.join("SHA256SUMS.sig"))
@@ -146,49 +205,16 @@ fn verify_signed_inventory(directory: &Path) -> Result<BTreeMap<String, String>,
     if !entries.contains_key("sdk.json") {
         return Err("signed SDK checksum inventory does not include sdk.json".into());
     }
-    let temp = std::env::temp_dir().join(format!(
-        "horizon-sdk-verify-{}-{}", std::process::id(),
-        NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&temp).map_err(|e| format!("cannot create SDK verification directory: {e}"))?;
-    let result = (|| {
-        let key = temp.join("release-key.pem");
-        let message = temp.join("signed-message");
-        std::fs::write(&key, RELEASE_PUBLIC_KEY_PEM).map_err(|e| e.to_string())?;
-        // The signed payload is the literal release tag followed by the complete SHA256SUMS file.
-        let mut signed = Vec::new();
-        let index: SdkIndex = serde_json::from_slice(&std::fs::read(directory.join("sdk.json")).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("invalid sdk.json: {e}"))?;
-        signed.clear();
-        signed.extend_from_slice(format!("horizon release sdk-{}\n", index.build.commit).as_bytes());
-        signed.extend_from_slice(&sums);
-        std::fs::write(&message, signed).map_err(|e| e.to_string())?;
-        let sig_path = temp.join("signature");
-        let mut verified = false;
-        for encoded in signatures.lines().filter(|line| !line.trim().is_empty()) {
-            // Decode through stdin so signature records are not interpolated into a shell command.
-            use std::process::Stdio;
-            let mut child = Command::new("base64").arg("-d").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()
-                .map_err(|e| format!("cannot start base64 verifier: {e}"))?;
-            child.stdin.take().ok_or("base64 stdin unavailable")?.write_all(encoded.as_bytes())
-                .map_err(|e| e.to_string())?;
-            let decoded = child.wait_with_output().map_err(|e| e.to_string())?;
-            if !decoded.status.success() { continue; }
-            std::fs::write(&sig_path, decoded.stdout).map_err(|e| e.to_string())?;
-            let check = Command::new("openssl").args([
-                "pkeyutl", "-verify", "-pubin", "-inkey", key.to_str().ok_or("temporary key path is not UTF-8")?,
-                "-rawin", "-in", message.to_str().ok_or("temporary message path is not UTF-8")?,
-                "-sigfile", sig_path.to_str().ok_or("temporary signature path is not UTF-8")?,
-            ]).output().map_err(|e| format!("OpenSSL SDK signature verifier unavailable: {e}"))?;
-            if check.status.success() { verified = true; break; }
-        }
-        if !verified { return Err("SDK Ed25519 release signature is invalid".into()); }
-        Ok(entries)
-    })();
-    let _ = std::fs::remove_dir_all(&temp);
-    result
+    let index: SdkIndex = serde_json::from_slice(
+        &std::fs::read(directory.join("sdk.json")).map_err(|e| e.to_string())?
+    ).map_err(|e| format!("invalid sdk.json: {e}"))?;
+    let mut signed = format!("horizon release sdk-{}\\n", index.build.commit).into_bytes();
+    signed.extend_from_slice(&sums);
+    if !verify_ed25519_payload(&signed, &signatures, RELEASE_PUBLIC_KEY_PEM)? {
+        return Err("SDK Ed25519 release signature is invalid".into());
+    }
+    Ok(entries)
 }
-
 
 impl VerifiedIdentity {
     /// Read an SDK only after independently verifying its signed release inventory and assets.
@@ -372,6 +398,15 @@ mod tests {
             "assets":assets,
             "inputs":{}
         })
+    }
+
+    #[test]
+    fn verifies_rfc8032_ed25519_signature_and_rejects_modified_payload() {
+        // RFC 8032, test 1: Ed25519 signature of the empty message.
+        const TEST_KEY: &str = "-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\\n-----END PUBLIC KEY-----\\n";
+        const SIGNATURE: &str = "5VZDAMNgrHKQhuLMgG6CioSHfx645dl02HPgZSJJAVVfuIIVkKM7rMYeOXAc+bRr0lv18FlbviRlUUFDjnoQCw==";
+        assert!(verify_ed25519_payload(b"", SIGNATURE, TEST_KEY).unwrap());
+        assert!(!verify_ed25519_payload(b"tampered", SIGNATURE, TEST_KEY).unwrap());
     }
 
     #[test]
