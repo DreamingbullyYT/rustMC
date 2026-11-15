@@ -402,10 +402,10 @@ mod tests {
 
     #[test]
     fn verifies_rfc8032_ed25519_signature_and_rejects_modified_payload() {
-        // RFC 8032, test 1: Ed25519 signature of the empty message.
-        const TEST_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n";
-        const SIGNATURE: &str = "5VZDAMNgrHKQhuLMgG6CioSHfx645dl02HPgZSJJAVVfuIIVkKM7rMYeOXAc+bRr0lv18FlbviRlUUFDjnoQCw==";
-        assert!(verify_ed25519_payload(b"", SIGNATURE, TEST_KEY).unwrap());
+        // RFC 8032, test 2: Ed25519 signature of the one-byte message "r".
+        const TEST_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAPUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=\n-----END PUBLIC KEY-----\n";
+        const SIGNATURE: &str = "kqAJqfDUyrhyDoILX2QlQKKye1QWUD+Ps3YiI+vbadoIWsHkPhWZbkWPNhPQ8R2MOHsurrQwKu6wDSkWErsMAA==";
+        assert!(verify_ed25519_payload(b"r", SIGNATURE, TEST_KEY).unwrap());
         assert!(!verify_ed25519_payload(b"tampered", SIGNATURE, TEST_KEY).unwrap());
     }
 
