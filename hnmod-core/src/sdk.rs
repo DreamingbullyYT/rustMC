@@ -359,45 +359,27 @@ mod tests {
     }
 
     #[test]
-    fn reads_only_an_installed_sdk_with_a_matching_signature_receipt() {
+    fn refuses_a_forged_install_receipt_without_a_signed_inventory() {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let temp = std::env::temp_dir().join(format!("hnmod-sdk-test-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
-        std::fs::create_dir_all(temp.join("slices")).unwrap();
-        let mut value = index("aarch64-linux-android");
-        let assets = value["assets"].as_object_mut().unwrap();
-        for (name, asset) in assets.iter_mut() {
-            let data = format!("asset:{name}").into_bytes();
-            std::fs::write(temp.join(name), &data).unwrap();
-            asset["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&data)));
-            asset["size"] = serde_json::json!(data.len());
-        }
+        std::fs::create_dir_all(&temp).unwrap();
+        let value = index("aarch64-linux-android");
         let bytes = serde_json::to_vec(&value).unwrap();
         std::fs::write(temp.join("sdk.json"), &bytes).unwrap();
         let parsed: SdkIndex = serde_json::from_slice(&bytes).unwrap();
-        let digest = format!("{:x}", Sha256::digest(&bytes));
         let receipt = serde_json::json!({
             "files": {},
             "signature_verified": true,
             "tag": format!("sdk-{}", parsed.build.commit),
-            "index_sha256": digest,
+            "index_sha256": format!("{:x}", Sha256::digest(&bytes)),
             "target": "aarch64-linux-android",
             "game_commit": parsed.build.commit,
             "mixins_rev": parsed.mixins.rev
         });
         std::fs::write(temp.join(".install-manifest.json"), serde_json::to_vec(&receipt).unwrap()).unwrap();
-        assert!(VerifiedIdentity::read(&temp).is_ok());
-        std::fs::write(temp.join("runtime-aarch64-linux-android.tar.xz"), b"tampered").unwrap();
-        assert!(VerifiedIdentity::read(&temp).unwrap_err().contains("does not match sdk.json"));
-        std::fs::write(temp.join("runtime-aarch64-linux-android.tar.xz"), b"asset:runtime-aarch64-linux-android.tar.xz").unwrap();
-        std::fs::create_dir_all(temp.join("slices/runtime")).unwrap();
-        std::fs::write(temp.join("slices/runtime/marker"), b"tampered").unwrap();
-        assert!(VerifiedIdentity::read(&temp).unwrap_err().contains("extracted files"));
-        std::fs::remove_file(temp.join("slices/runtime/marker")).unwrap();
-        let mut bad = receipt;
-        bad["signature_verified"] = serde_json::Value::Bool(false);
-        std::fs::write(temp.join(".install-manifest.json"), serde_json::to_vec(&bad).unwrap()).unwrap();
-        assert!(VerifiedIdentity::read(&temp).unwrap_err().contains("unsigned"));
+        let error = VerifiedIdentity::read(&temp).unwrap_err();
+        assert!(error.contains("signed checksum inventory is missing"), "{error}");
         std::fs::remove_dir_all(temp).unwrap();
     }
 
